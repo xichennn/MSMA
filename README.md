@@ -40,8 +40,8 @@ and there are two in the model arguments that control the data fusion:
 
 ### Quantitative Results
 <p float="left">
-    <img src="assets/delay.png" width="400" />
-    <img src="assets/noise.png" width="400" />
+    <img src="assets/delay.png" width="350" />
+    <img src="assets/noise.png" width="350" />
 </p>
 
 | Metrics | MPR=0 | MPR=0.2 | MPR=0.4 | MPR=0.6 |MPR=0.8 |
