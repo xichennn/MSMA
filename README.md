@@ -55,6 +55,19 @@ and there are two in the model arguments that control the data fusion:
 | -------------------------- | -------------------------- |-------------------------- | 
 | ![MPR=0](assets/s700_mpr0.png)   | ![MPR=0.4](assets/s700_mpr4.png)   | ![MPR=0.8](assets/s700_mpr8.png)   |
 
+## Citation
+
+If you found this repository useful, please cite as:
+
+```
+@article{chen2024msma,
+  title={MSMA: Multi-agent Trajectory Prediction in Connected and Autonomous Vehicle Environment with Multi-source Data Integration},
+  author={Chen, Xi and Bhadani, Rahul and Sun, Zhanbo and Head, Larry},
+  journal={arXiv preprint arXiv:2407.21310},
+  year={2024}
+}
+```
+
 ## License
 
 This repository is licensed under [Apache 2.0](LICENSE).
