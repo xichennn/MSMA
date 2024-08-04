@@ -8,7 +8,6 @@ import pandas as pd
 import copy
 from os.path import join as pjoin
 
-# sys.path.append('/Users/xichen/Documents/paper2-traj-pred/carla-data/MSMA')
 from dataloader.utils import lane_segment, load_xml
 from dataloader.utils.lane_sampling import Spline2D, visualize_centerline
 import matplotlib.pyplot as plt
@@ -22,28 +21,40 @@ from torch_geometric.data import Data, HeteroData
 from torch_geometric.data import Dataset
 from typing import Callable, Dict, List, Optional, Tuple, Union
 from itertools import permutations, product
+from tqdm import tqdm
 
 class scene_processed_dataset(Dataset):
     def __init__(self, 
                  root:str,
                  split:str,
+                 radius:float = 75,
+                 local_radius:float = 30,
                  transform: Optional[Callable] = None,
-                 mpr:float = 0.) ->None:
+                 mpr:float = 0.,
+                 obs_len:float=50,
+                 fut_len:float=50,
+                 cv_range:float=50,
+                 av_range:float=30,
+                 noise_var:float=0.1,
+                 delay_frame:float=1,
+                 normalized=True,
+                 source_dir:str = None,
+                 save_dir:str = None) ->None:
         
         self._split = split
-        self.mprs = [0., 0.2, 0.4, 0.6, 0.8]
-        self.mprs_dir = ["mpr0", "mpr2", "mpr4", "mpr6", "mpr8"]
+        self._radius = radius
+        self._local_radius = local_radius
+        self.obs_len = obs_len
+        self.fut_len = fut_len
+        self.cv_range = cv_range
+        self.av_range = av_range
+        self.mpr = mpr
+        self.noise_var = noise_var
+        self.delay_frame = delay_frame
+        self.normalized = normalized
+        self.source_dir = source_dir
+        self.save_dir = save_dir
 
-        self.mpr_dir = self.mprs_dir[self.mprs.index(mpr)]
-
-        if split == 'train':
-            self._directory = 'train'
-        elif split == 'val':
-            self._directory = 'val'
-        elif split == 'test':
-            self._directory = 'test'
-        else:
-            raise ValueError(split + ' is not valid')
         self.root = root
         self._raw_file_names = os.listdir(self.raw_dir)
         self._processed_file_names = [os.path.splitext(f)[0] + '.pt' for f in self.raw_file_names]
@@ -52,11 +63,11 @@ class scene_processed_dataset(Dataset):
 
     @property
     def raw_dir(self) -> str:
-        return os.path.join(self.root, self.mpr_dir, self._directory)
+        return os.path.join(self.root, self.source_dir, self._split)
 
     @property
     def processed_dir(self) -> str:
-        return os.path.join(self.root, self.mpr_dir, self._directory)
+        return os.path.join(self.root, self.save_dir, self._split)
 
     @property
     def raw_file_names(self) -> Union[str, List[str], Tuple]:
@@ -71,98 +82,37 @@ class scene_processed_dataset(Dataset):
         return self._processed_paths
 
     def process(self) -> None:
-        pass
-
+        self.get_map_polygon_bbox()
+        for raw_path in tqdm(self.raw_paths):
+            kwargs = self.get_scene_feats(raw_path, self._radius, self._local_radius, self._split)
+            data = CarlaData(**kwargs)
+            torch.save(data, os.path.join(self.processed_dir, str(kwargs['seq_id']) + '.pt'))
+    
     def len(self) -> int:
         return len(self._raw_file_names)
 
     def get(self, idx) -> Data:
         return torch.load(self.processed_paths[idx])
-
-class scene_process():
-    def __init__(self, split="train", obs_len=50, obs_range=50,
-                 fut_len=50, cv_range=50, av_range=30, map_radius=75,
-                 local_radius=30, mpr=0, noise_var=0.1, delay_frame=1,
-                 normalized=True,save_dir=None, 
-                 csv_folder="scene_mining_intermediate/small_data"):
-        
-        self.COLOR_DICT = {"CAV": "#d33e4c", "CV": "g", "NCV": "darkorange"}
-        self.split = split
-        self.obs_len = obs_len
-        self.obs_range = obs_range
-        self.fut_len = fut_len
-        self.cv_range = cv_range
-        self.av_range = av_range
-        self.map_radius = map_radius
-        self.local_radius = local_radius
-        self.mpr = mpr
-        self.noise_var = noise_var
-        self.delay_frame = delay_frame
-        self.normalized = normalized
-        self.save_dir = save_dir
-        self.abs_path = os.path.dirname(__file__)
-        self.loader = CarlaCSVLoader(pjoin(self.abs_path,"../../{}".format(csv_folder)))
-
-    def __getitem__(self, idx, dir_post="train"):
-        f_path = self.loader.seq_list[idx]
-        df = pd.read_csv(f_path)
-        path, seq_f_name_ext = os.path.split(f_path)
-
-        return self.process_and_save(df, seq_id=idx, file_name=seq_f_name_ext, 
-                                     dir_=pjoin(self.abs_path,"../../scene_mining_cav/", self.save_dir, dir_post))
     
-    def process_and_save(self, df, seq_id, file_name, dir_=None):
-        """
-        save the feature in the data sequence in a single csv files
-        :param dataframe: DataFrame, the data frame
-        :param set_name: str, the name of the folder name, exp: train, eval, test
-        :param file_name: str, the name of csv file
-        :param dir_: str, the directory to store the csv file
-        :return:
-        """
-        df_processed = self.process(df, seq_id)
-        self.save(df_processed, file_name, dir_)
-
-    def save(self, df, file_name, dir_=None):
-        """
-        save the feature in the data sequence in a single csv files
-        :param df: DataFrame, the dataframe encoded
-        :param set_name: str, the name of the folder name, exp: train, eval, test
-        :param file_name: str, the name of csv file
-        :param dir_: str, the directory to store the csv file
-        :return:
-        """
-        if not os.path.exists(dir_):
-            os.makedirs(dir_)
-
-        torch.save(df, os.path.join(dir_, file_name + '.pt'))
-      
     def get_map_polygon_bbox(self):
-        rel_path = "../carla_data/Town03.osm"
-        roads = load_xml.load_lane_segments_from_xml(pjoin(self.abs_path, rel_path))
+        rel_path = "Town03.osm"
+        roads = load_xml.load_lane_segments_from_xml(pjoin(self.root, rel_path))
         polygon_bboxes, lane_starts, lane_ends = load_xml.build_polygon_bboxes(roads)
         self.roads = roads
         self.polygon_bboxes = polygon_bboxes
         self.lane_starts = lane_starts
         self.lane_ends = lane_ends
 
-    def process(self, df, seq_id):
-        self.get_map_polygon_bbox()
-
-        kwargs = self.get_scene_feats(df, seq_id, self.map_radius, self.local_radius, self.split)
-        data = CarlaData(**kwargs)
-
-        return data
-
-    def get_scene_feats(self, df, seq_id, radius, local_radius, split="train"):
-
+    def get_scene_feats(self, raw_path, radius, local_radius, split="train"):
+        
+        df = pd.read_csv(raw_path)
         # filter out actors that are unseen during the historical time steps
         timestamps = list(np.sort(df['frame'].unique()))
         historical_timestamps = timestamps[: 50]
         historical_df = df[df['frame'].isin(historical_timestamps)]
         actor_ids = list(historical_df['vid'].unique())
         
-        # filter out unmoved actors
+        # # filter out unmoved actors
         # actor_ids = self.remove_unmoved_ids(df, actor_ids)
 
         df = df[df['vid'].isin(actor_ids)]
@@ -170,7 +120,7 @@ class scene_process():
 
         objs = df.groupby(['vid', 'obj_type_mpr_02', 'obj_type_mpr_04', 'obj_type_mpr_06', 'obj_type_mpr_08', 'in_av_range']).groups
         keys = list(objs.keys())
-    
+        
         vids = [x[0] for x in keys]
         actor_indices = [vids.index(x) for x in actor_ids]
         obj_type_02 = [keys[i][1] for i in actor_indices]
@@ -178,18 +128,9 @@ class scene_process():
         obj_type_06 = [keys[i][3] for i in actor_indices]
         obj_type_08 = [keys[i][4] for i in actor_indices]
         in_av_range = [keys[i][5] for i in actor_indices]
-
-        # obj_type_02 = [x[1] for x in keys]
-
-
-        # cav_idx = obj_type.index("cav")
+       
         cav_idx = np.where(np.asarray(obj_type_02)=="cav")[0] #np array
-        # ncv_idx = np.where(np.asarray(obj_type)=="ncv")[0] #np array
-        # cv_idx = np.where(np.asarray(obj_type)=="cv")[0] #np array
-
         cav_df = df[df['obj_type_mpr_02'] == 'cav'].iloc
-        # cv_df = df[df['obj_type_mpr_02'] == 'cv'].iloc
-        # ncv_df = df[df['obj_type_mpr_02'] == 'ncv'].iloc
 
         # make the scene centered at CAV
         origin = torch.tensor([cav_df[49]['position_x'], cav_df[49]['position_y']], dtype=torch.float)
@@ -209,10 +150,10 @@ class scene_process():
             node_idx = actor_ids.index(actor_id)
             node_steps = [timestamps.index(timestamp) for timestamp in actor_df['frame']]
             padding_mask[node_idx, node_steps] = False
-            if padding_mask[node_idx, 49]:  # make no predictions for actors that are unseen at current timestep
+            if padding_mask[node_idx, 49]:  # make no predictions for actors that are unseen at the current time step
                 padding_mask[node_idx, 50:] = True
-            xy = torch.from_numpy(np.stack([actor_df['position_x'].values, actor_df['position_y'].values], axis=-1)).float() #[100,2]
-            x[node_idx, node_steps] = torch.matmul(xy - origin, rotate_mat)
+            xy = torch.from_numpy(np.stack([actor_df['position_x'].values, actor_df['position_y'].values], axis=-1)).float()
+            x[node_idx, node_steps] = torch.matmul(rotate_mat, (xy - origin.reshape(-1, 2)).T).T
             node_historical_steps = list(filter(lambda node_step: node_step < 50, node_steps))
             if len(node_historical_steps) > 1:  # calculate the heading of the actor (approximately)
                 heading_vector = x[node_idx, node_historical_steps[-1]] - x[node_idx, node_historical_steps[-2]]
@@ -220,6 +161,7 @@ class scene_process():
             else:  # make no predictions for the actor if the number of valid time steps is less than 2
                 padding_mask[node_idx, 50:] = True
 
+        # bos_mask is True if time step t is valid and time step t-1 is invalid
         bos_mask[:, 0] = ~padding_mask[:, 0]
         bos_mask[:, 1: 50] = padding_mask[:, : 49] & ~padding_mask[:, 1: 50]
 
@@ -256,7 +198,10 @@ class scene_process():
         y = torch.where((padding_mask[:, 49].unsqueeze(-1) | padding_mask[:, 50:]).unsqueeze(-1),
                                 torch.zeros(num_nodes, 50, 2),
                                 x[:, 50:] - x[:, 49].unsqueeze(-2))
-
+        
+        y_commu = torch.where((padding_mask[:, 49].unsqueeze(-1) | padding_mask[:, 50:]).unsqueeze(-1),
+                                torch.zeros(num_nodes, 50, 2),
+                                x[:, 50:] - x[:, 49-self.delay_frame].unsqueeze(-2))[commu_mask]
 
         lane_pos, lane_vectors, lane_idcs,lane_actor_index, lane_actor_attr = \
             self.get_lane_feats(origin, rotate_mat, num_nodes, positions, radius, local_radius)
@@ -269,7 +214,9 @@ class scene_process():
         rotate_imat[:, 0, 1] = -sin_vals
         rotate_imat[:, 1, 0] = sin_vals
         rotate_imat[:, 1, 1] = cos_vals
-
+        
+        seq_id = os.path.splitext(os.path.basename(raw_path))[0]
+        
         return {
             'x_cav': x_cav_vec,  # [1, 30, 2]
             'x_commu': x_commu_delay_vec,  # [N1, 30, 2]
@@ -280,10 +227,10 @@ class scene_process():
             'positions': positions,  # [N, 100, 2]
             'edge_index': edge_index,  # [2, N x (N - 1)]
             'y': y,  # [N, 50, 2]
-            'y_commu_ori': x_commu_delay[:,-1,:], #[N,2]
-            'y_sensor_ori': x_sensor_noise[:,-1,:], #[N,2]
-            'seq_id': seq_id, #int
-            # 'file_name': file_name, #str
+            'y_commu': y_commu, #[M, 50, 2]
+            'x_commu_ori': x_commu_delay[:,-1,:], #abs starting pos of delayed traj
+            'x_sensor_ori': x_sensor_noise[:,-1,:], #abs starting pos of nosiy traj
+            'seq_id': seq_id, #str, file_name
             'num_nodes': num_nodes,
             'padding_mask': padding_mask,  # [N, 100]
             'bos_mask': bos_mask,  # [N, 50]
@@ -295,16 +242,11 @@ class scene_process():
             'lane_actor_index': lane_actor_index, 
             'lane_actor_attr': lane_actor_attr,
             'mpr': self.mpr,
-            # 'obj_type_02': obj_type_02_, #tensor(str) [N]
-            # 'obj_type_04': obj_type_04_, #tensor(str) [N]
-            # 'obj_type_06': obj_type_06_, #tensor(str) [N]
-            # 'obj_type_08': obj_type_08_, #tensor(str) [N]
-            # 'in_av_range': in_av_range_, #tensor(bool) [N]
             'origin': origin.unsqueeze(0),
             'theta': theta,
             'rotate_mat': rotate_mat
         }
-    
+        
     def get_lane_feats(self, origin, rotate_mat, num_nodes, positions, radius=75, local_radius=30):
 
         road_ids = load_xml.get_road_ids_in_xy_bbox(self.polygon_bboxes, self.lane_starts, self.lane_ends, self.roads, origin[0], origin[1], radius)
@@ -315,10 +257,12 @@ class scene_process():
             road = self.roads[road_id]
             ctr_line = torch.from_numpy(np.stack(((self.roads[road_id].l_bound[:,0]+self.roads[road_id].r_bound[:,0])/2, 
                             (self.roads[road_id].l_bound[:,1]+self.roads[road_id].r_bound[:,1])/2),axis=-1))
-            ctr_line = torch.matmul(ctr_line.float() - origin, rotate_mat)
+            ctr_line = torch.matmul(rotate_mat, (ctr_line - origin.reshape(-1, 2)).T.float()).T
 
             x, y = ctr_line[:,0], ctr_line[:,1]
-
+            # if x.max() < x_min or x.min() > x_max or y.max() < y_min or y.min() > y_max:
+            #     continue
+            # else:
             """getting polygons requires original centerline"""
             polygon, _, _ = load_xml.build_polygon_bboxes({road_id: self.roads[road_id]})
             polygon_x = torch.from_numpy(np.array([polygon[:,0],polygon[:,0],polygon[:,2],polygon[:,2],polygon[:,0]]))
@@ -326,7 +270,7 @@ class scene_process():
             polygon_reshape = torch.cat([polygon_x,polygon_y],dim=-1) #shape(5,2)
 
             road.centerline = ctr_line
-            road.polygon = torch.matmul(polygon_reshape.float() - origin.reshape(-1, 2),rotate_mat).float() 
+            road.polygon = torch.matmul(rotate_mat, (polygon_reshape.float() - origin.reshape(-1, 2)).T).T
             lanes[road_id] = road
 
         lane_ids = list(lanes.keys())
@@ -334,7 +278,10 @@ class scene_process():
         for lane_id in lane_ids:
             lane = lanes[lane_id]
             ctrln = lane.centerline
-            lane_pos.append(ctrln[:-1])#lane starting point
+
+            # lane_ctrs.append(torch.from_numpy(np.asarray((ctrln[:-1]+ctrln[1:])/2.0, np.float32)))#lane center point
+            # lane_vectors.append(torch.from_numpy(np.asarray(ctrln[1:]-ctrln[:-1], np.float32))) #length between waypoints
+            lane_pos.append(ctrln[:-1]) #lane center point
             lane_vectors.append(ctrln[1:]-ctrln[:-1])#length between waypoints
 
         lane_idcs = []
@@ -357,7 +304,6 @@ class scene_process():
         
 
         return lane_pos, lane_vectors, lane_idcs, lane_actor_index, lane_actor_attr
-
     
     def get_vectorized_x(self, x0, padding_mask):
         '''
@@ -397,7 +343,7 @@ class scene_process():
         """
         noise = torch.normal(0, var, x.shape)
         
-        return (x+noise)[:,20:,:], padding_mask[:,20:]
+        return (x+noise)[:,20:,:], padding_mask[:,20:50]
 
     def get_delayed_x(self, x, padding_mask, lag=1):
         """
@@ -415,109 +361,6 @@ class scene_process():
 
         return delayed_x, padding_mask[:, 20-lag:50-lag]
     
-    def visualize_rotation_invariance(self, x, rotate_angles):
-
-        rotate_mat = torch.empty(x.shape[0], 2, 2)
-        sin_vals = torch.sin(rotate_angles)
-        cos_vals = torch.cos(rotate_angles)
-        rotate_mat[:, 0, 0] = cos_vals
-        rotate_mat[:, 0, 1] = -sin_vals
-        rotate_mat[:, 1, 0] = sin_vals
-        rotate_mat[:, 1, 1] = cos_vals
-
-        xrot = torch.bmm(x, rotate_mat)
-        for i in range(xrot.shape[0]):
-            plt.plot(xrot[i,:50,0], xrot[i,:50,1], 'b')
-            plt.plot(xrot[i,50:,0], xrot[i,50:,1], 'b--')
-            plt.plot(x[i,:50,0], x[i,:50,1],'r')
-            plt.plot(x[i,50:,0], x[i,50:,1],'r--')
-        return xrot
-    
-    def visualize_data(self, data):
-        """
-        visualize the extracted data, and exam the data
-        """
-        fig = plt.figure(0, figsize=(8, 7))
-        fig.clear()
-
-        # visualize the centerlines
-        lane_pos = data.lane_pos
-        lane_vectors = data.lane_vectors
-        lane_idcs = data.lane_idcs
-        for i in np.unique(lane_idcs):
-            lane_str = lane_pos[lane_idcs == i]
-            lane_vector = lane_vectors[lane_idcs == i]
-            lane_end = lane_str + lane_vector
-            lane = np.vstack([lane_str, lane_end[-1,:].reshape(-1, 2)])
-            self.visualize_centerline(lane)
-
-        # visualize the trajectory
-        hist = data.positions[:,:50,:]
-        fut = data.positions[:,50:,:]
-        obj_type = np.zeros((hist.shape[0]))+3
-        obj_type[data.cav_mask] = 1
-        obj_type[data.commu_mask] = 2
-
-        for i in range(hist.shape[0]):
-            self.plot_traj(hist[i], fut[i], obj_type[i], i)
-
-        plt.xlabel("Map X")
-        plt.ylabel("Map Y")
-        plt.savefig('scene_process.png', dpi=fig.dpi)
-        plt.show(block=False)
-        plt.pause(5)
-
-    def visualize_centerline(self, centerline) -> None:
-        """Visualize the computed centerline.
-        Args:
-            centerline: Sequence of coordinates forming the centerline
-        """
-        line_coords = list(zip(*centerline))
-        lineX = line_coords[0]
-        lineY = line_coords[1]
-        plt.plot(lineX, lineY, "--", color="grey", alpha=1, linewidth=1, zorder=0)
-        plt.text(lineX[0], lineY[0], "s")
-        plt.text(lineX[-1], lineY[-1], "e")
-        plt.axis("equal")
-
-    def plot_traj(self, obs, pred, obj_type, traj_id):
-        
-        traj_na = "t{}".format(traj_id) if traj_id else "traj"
-        if obj_type==1:
-            obj_type = "CAV" 
-        elif obj_type==2:
-            obj_type = "CV"
-        else:
-            obj_type = "NCV" 
-
-        plt.plot(obs[:, 0], obs[:, 1], color=self.COLOR_DICT[obj_type], alpha=1, linewidth=1, zorder=15)
-        plt.plot(pred[:, 0], pred[:, 1], '--', color=self.COLOR_DICT[obj_type], alpha=1, linewidth=1, zorder=20)
-    
-class CarlaCSVLoader():
-    def __init__(self, root_dir):
-        """ Load csv files from root_dir
-        param: 
-        root_dir: path to the folder containing sequence csv files
-        """
-        self.counter = 0
-        self.seq_list = [pjoin(root_dir, x) for x in os.listdir(root_dir) if "scene" in x]
-        self.current_seq = self.seq_list[self.counter]
-
-    def seq_df(self):
-        """Get the dataframe for the current sequence."""
-
-        return self.read_csv(self.current_seq)
-    def read_csv(self, path):
-        """csv reader
-        params:
-        path: Path to the csv file
-
-        returns:
-        dataframe containing the loaded csv
-        """
-        return pd.read_csv(path)
-
-    
 class CarlaData(Data):
 
     def __init__(self,
@@ -533,10 +376,10 @@ class CarlaData(Data):
                  lane_actor_index: Optional[torch.Tensor] = None,
                  lane_actor_attr: Optional[torch.Tensor] = None,
                  y: Optional[torch.Tensor] = None,
-                 y_commu_ori: Optional[torch.Tensor] = None,
-                 y_sensor_ori: Optional[torch.Tensor] = None,
-                 seq_id: Optional[int] = None,
-                #  file_name: Optional[str] = None,
+                 y_commu: Optional[torch.Tensor] = None,
+                 x_commu_ori: Optional[torch.Tensor] = None,
+                 x_sensor_ori: Optional[torch.Tensor] = None,
+                 seq_id: Optional[str] = None,
                  num_nodes: Optional[int] = None,
                  padding_mask: Optional[torch.Tensor] = None,
                  bos_mask: Optional[torch.Tensor] = None,
@@ -549,19 +392,25 @@ class CarlaData(Data):
                  origin: Optional[torch.Tensor] = None,
                  theta: Optional[torch.Tensor] = None,
                  rotate_mat: Optional[torch.Tensor] = None,
+                # obj_type_02: Optional[torch.Tensor] = None,
+                # obj_type_04: Optional[torch.Tensor] = None,
+                # obj_type_06: Optional[torch.Tensor] = None,
+                # obj_type_08: Optional[torch.Tensor] = None,
+                # in_av_range: Optional[torch.Tensor] = None,
                  **kwargs) -> None:
         if x_cav is None:
             super(CarlaData, self).__init__()
             return
         super(CarlaData, self).__init__(x_cav=x_cav, x_commu=x_commu, x_sensor=x_sensor, mpr=mpr,
                                         cav_mask=cav_mask, commu_mask=commu_mask, sensor_mask=sensor_mask,
-                                        positions=positions, edge_index=edge_index, rotate_imat=rotate_imat,
-                                        edge_attrs=edge_attrs,lane_actor_index=lane_actor_index, 
-                                        lane_actor_attr=lane_actor_attr, y=y, y_commu_ori=y_commu_ori,
-                                        y_sensor_ori=y_sensor_ori, seq_id=seq_id, num_nodes=num_nodes, 
-                                        padding_mask=padding_mask, bos_mask=bos_mask, rotate_angles=rotate_angles, 
+                                        positions=positions, edge_index=edge_index, edge_attrs=edge_attrs,
+                                        lane_actor_index=lane_actor_index, lane_actor_attr=lane_actor_attr,
+                                        y=y, y_commu=y_commu, x_commu_ori=x_commu_ori, x_sensor_ori=x_sensor_ori,
+                                        seq_id=seq_id, num_nodes=num_nodes, padding_mask=padding_mask, 
+                                        bos_mask=bos_mask, rotate_angles=rotate_angles, rotate_imat=rotate_imat,
                                         lane_vectors=lane_vectors, lane_pos=lane_pos, lane_idcs=lane_idcs, 
-                                        theta=theta, rotate_mat=rotate_mat, **kwargs)
+                                        theta=theta, rotate_mat=rotate_mat, 
+                                        **kwargs)
         if edge_attrs is not None:
             for t in range(self.x.size(1)):
                 self[f'edge_attr_{t}'] = edge_attrs[t]
@@ -571,21 +420,4 @@ class CarlaData(Data):
             return torch.tensor([[self['lane_vectors'].size(0)], [self.num_nodes]])
         else:
             return super().__inc__(key, value)
-
-if __name__ == "__main__":
-
-    frame = 31601
-    cav = 454
-    test = scene_process(map_radius=75, local_radius=30, mpr=0.6, save_dir="mpr6/")
-    rel_path = "../../scene_mining/scene_{}_{}".format(frame,cav)
-    df = pd.read_csv(os.path.join(test.abs_path, rel_path))
-    
-    data = test.process(df, 0)
-    test.visualize_data(data)
-
-    from visualization import get_rotate_invariant_trajs
-    xrot, yrot, rotate_mat = get_rotate_invariant_trajs(data)
-
-
-
 
